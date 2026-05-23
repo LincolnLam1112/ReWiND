@@ -1,0 +1,53 @@
+#!/bin/bash
+#SBATCH --job-name=rewind_openx_vla_replica_flow
+#SBATCH --output=/scr2/yusenluo/ReWiND/logs/rewind_openx_vla_replica_flow_%j.out
+#SBATCH --error=/scr2/yusenluo/ReWiND/logs/rewind_openx_vla_replica_flow_%j.err
+#SBATCH --ntasks=1
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=16
+#SBATCH --time=36:00:00
+#SBATCH --mem=96G
+
+source /scr/yusenluo/anaconda3/etc/profile.d/conda.sh
+conda activate rewind
+
+# Wandb auth: use $WANDB_API_KEY if exported, else fall back to ~/.netrc
+# (created by `wandb login`). If neither, run with WANDB_MODE=disabled.
+if [ -f "${WANDB_ENV_FILE:-$HOME/.config/wandb/env}" ]; then
+  source "${WANDB_ENV_FILE:-$HOME/.config/wandb/env}"
+fi
+if [ -z "${WANDB_API_KEY:-}" ] && ! grep -q "api.wandb.ai" "$HOME/.netrc" 2>/dev/null; then
+  echo "[INFO] No wandb credentials found; running with WANDB_MODE=disabled."
+  export WANDB_MODE=disabled
+fi
+export WANDB_ENTITY="${WANDB_ENTITY:-yusenluo}"
+
+cd /scr2/yusenluo/ReWiND
+
+# OpenX cleaned pool (motion-bearing only): 1923 instructions / 29301 traj / 2.9 GB.
+# (Original train h5 had 4045 zero-motion groups that polluted ~65% of sampled batches.)
+# VLA Replica filtered_train = small target-domain mix-in (11 instructions / 144 traj).
+OPENX_H5=${OPENX_H5:-datasets/rewind_openx_flow_embeddings/full_openx_flow_embeddings_train_clean.h5}
+VLA_TRAIN_H5=${VLA_TRAIN_H5:-datasets/vla_replica_filtered_train.h5}
+EVAL_SEEN_PATH=${EVAL_SEEN_PATH:-datasets/vla_replica_filtered_eval_seen.h5}
+EVAL_UNSEEN_PATH=${EVAL_UNSEEN_PATH:-datasets/vla_replica_filtered_eval_unseen.h5}
+
+python train_reward.py \
+  --wandb_entity "${WANDB_ENTITY}" \
+  --wandb_project rewind-openx-vla-replica-flow \
+  --openx_embedding_path "${OPENX_H5}" \
+  --extra_data_type vla_replica \
+  --extra_train_h5_path "${VLA_TRAIN_H5}" \
+  --vla_eval_seen_h5_path "${EVAL_SEEN_PATH}" \
+  --vla_eval_unseen_h5_path "${EVAL_UNSEEN_PATH}" \
+  --progress_target_type optical_flow \
+  --flow_missing_fallback error \
+  --rewind --use_freeze \
+  --subsample_video --max_length 16 \
+  --extra_data_ratio 0.2 \
+  --batch_size 1024 \
+  --epochs 20 \
+  --lr 1e-4 \
+  --lambda_dir 0.0 \
+  --cosine_scheduler --clip_grad \
+  --worker 4

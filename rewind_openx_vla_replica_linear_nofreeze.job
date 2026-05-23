@@ -1,0 +1,55 @@
+#!/bin/bash
+#SBATCH --job-name=rewind_openx_vla_replica_linear_nofreeze
+#SBATCH --output=/scr2/yusenluo/ReWiND/logs/rewind_openx_vla_replica_linear_nofreeze_%j.out
+#SBATCH --error=/scr2/yusenluo/ReWiND/logs/rewind_openx_vla_replica_linear_nofreeze_%j.err
+#SBATCH --ntasks=1
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=16
+#SBATCH --time=36:00:00
+#SBATCH --mem=96G
+
+source /scr/yusenluo/anaconda3/etc/profile.d/conda.sh
+conda activate rewind
+
+# Wandb auth (same fallback chain as the main run)
+if [ -f "${WANDB_ENV_FILE:-$HOME/.config/wandb/env}" ]; then
+  source "${WANDB_ENV_FILE:-$HOME/.config/wandb/env}"
+fi
+if [ -z "${WANDB_API_KEY:-}" ] && ! grep -q "api.wandb.ai" "$HOME/.netrc" 2>/dev/null; then
+  echo "[INFO] No wandb credentials found; running with WANDB_MODE=disabled."
+  export WANDB_MODE=disabled
+fi
+export WANDB_ENTITY="${WANDB_ENTITY:-yusenluo}"
+
+cd /scr2/yusenluo/ReWiND
+
+# Baseline: linear progress target + rewind only (no freeze) + same OpenX clean
+# pool + VLA Replica mix-in. Strips two ReWiND enhancements from the main run:
+#   - --progress_target_type linear   (vs optical_flow)
+#   - no --use_freeze                 (rewind path uses sample_reverse_video_feature
+#                                       instead of sample_reverse_uniform_frozen_video_feature)
+# Everything else identical (data, batch_size, lr, epochs, eval, etc.) so the
+# delta vs main is purely the two ablated knobs.
+OPENX_H5=${OPENX_H5:-datasets/rewind_openx_flow_embeddings/full_openx_flow_embeddings_train_clean.h5}
+VLA_TRAIN_H5=${VLA_TRAIN_H5:-datasets/vla_replica_filtered_train.h5}
+EVAL_SEEN_PATH=${EVAL_SEEN_PATH:-datasets/vla_replica_filtered_eval_seen.h5}
+EVAL_UNSEEN_PATH=${EVAL_UNSEEN_PATH:-datasets/vla_replica_filtered_eval_unseen.h5}
+
+python train_reward.py \
+  --wandb_entity "${WANDB_ENTITY}" \
+  --wandb_project rewind-openx-vla-replica-baseline \
+  --openx_embedding_path "${OPENX_H5}" \
+  --extra_data_type vla_replica \
+  --extra_train_h5_path "${VLA_TRAIN_H5}" \
+  --vla_eval_seen_h5_path "${EVAL_SEEN_PATH}" \
+  --vla_eval_unseen_h5_path "${EVAL_UNSEEN_PATH}" \
+  --progress_target_type linear \
+  --rewind \
+  --subsample_video --max_length 16 \
+  --extra_data_ratio 0.2 \
+  --batch_size 1024 \
+  --epochs 20 \
+  --lr 1e-4 \
+  --lambda_dir 0.0 \
+  --cosine_scheduler --clip_grad \
+  --worker 4

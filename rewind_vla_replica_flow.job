@@ -1,0 +1,48 @@
+#!/bin/bash
+#SBATCH --job-name=rewind_vla_replica_flow
+#SBATCH --output=/scr2/yusenluo/ReWiND/logs/rewind_vla_replica_flow_%j.out
+#SBATCH --error=/scr2/yusenluo/ReWiND/logs/rewind_vla_replica_flow_%j.err
+#SBATCH --ntasks=1
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=16
+#SBATCH --time=24:00:00
+#SBATCH --mem=64G
+
+source /scr/yusenluo/anaconda3/etc/profile.d/conda.sh
+conda activate rewind
+
+# Wandb auth: use $WANDB_API_KEY if exported, else fall back to ~/.netrc
+# (created by `wandb login`). If neither, run with WANDB_MODE=disabled.
+if [ -f "${WANDB_ENV_FILE:-$HOME/.config/wandb/env}" ]; then
+  source "${WANDB_ENV_FILE:-$HOME/.config/wandb/env}"
+fi
+if [ -z "${WANDB_API_KEY:-}" ] && ! grep -q "api.wandb.ai" "$HOME/.netrc" 2>/dev/null; then
+  echo "[INFO] No wandb credentials found; running with WANDB_MODE=disabled."
+  export WANDB_MODE=disabled
+fi
+export WANDB_ENTITY="${WANDB_ENTITY:-yusenluo}"
+
+cd /scr2/yusenluo/ReWiND
+
+H5_PATH=${H5_PATH:-datasets/vla_replica_filtered_train.h5}
+EVAL_SEEN_PATH=${EVAL_SEEN_PATH:-datasets/vla_replica_filtered_eval_seen.h5}
+EVAL_UNSEEN_PATH=${EVAL_UNSEEN_PATH:-datasets/vla_replica_filtered_eval_unseen.h5}
+
+python train_reward.py \
+  --wandb_entity "${WANDB_ENTITY}" \
+  --wandb_project rewind-vla-replica-flow \
+  --openx_embedding_path "${H5_PATH}" \
+  --vla_eval_seen_h5_path "${EVAL_SEEN_PATH}" \
+  --vla_eval_unseen_h5_path "${EVAL_UNSEEN_PATH}" \
+  --progress_target_type optical_flow \
+  --flow_missing_fallback error \
+  --skip_metaworld_eval \
+  --rewind --use_freeze \
+  --subsample_video --max_length 16 \
+  --extra_data_ratio 1.0 \
+  --batch_size 256 \
+  --epochs 20 \
+  --lr 1e-4 \
+  --lambda_dir 0.0 \
+  --cosine_scheduler --clip_grad \
+  --worker 4

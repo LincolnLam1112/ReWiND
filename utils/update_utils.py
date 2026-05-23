@@ -55,9 +55,89 @@ class CosineWithMinLRScheduler(torch.optim.lr_scheduler._LRScheduler):
             # Keep the minimum learning rate
             return [self.min_lr for _ in self.base_lrs]
 
+def _train_step_openx_only(args, openx_data, rewind_model, optimizer, scheduler):
+    rewind_model.train()
+    optimizer.zero_grad()
+
+    pos_video = openx_data["video_array"].to(device).float()
+    pos_text = openx_data["text_array"].squeeze(1).to(device).float()
+    pos_progress = openx_data["progress"].to(device).float()
+    pos_goal_distance = openx_data["goal_distance"].to(device).float()
+    pos_rewind_mask = openx_data["rewind_mask"].to(device).float()
+
+    n = pos_video.shape[0]
+    roll = max(1, n // 2)
+    neg_video = torch.roll(pos_video, roll, 0)
+    neg_text = pos_text.clone()
+    neg_progress = torch.zeros_like(pos_progress)
+    neg_goal_distance = torch.zeros_like(pos_goal_distance)
+    neg_rewind_mask = torch.zeros_like(pos_rewind_mask)
+
+    video = torch.cat([pos_video, neg_video], dim=0)
+    text = torch.cat([pos_text, neg_text], dim=0)
+    progress = torch.cat([pos_progress, neg_progress], dim=0)
+    goal_distance = torch.cat([pos_goal_distance, neg_goal_distance], dim=0)
+    rewind_mask = torch.cat([pos_rewind_mask, neg_rewind_mask], dim=0)
+    positive_mask = torch.cat([torch.ones(n), torch.zeros(n)], dim=0).bool().to(device)
+
+    progress_pred = rewind_model(video, text)
+    progress_loss = mse_loss(progress_pred[:, 1:].squeeze(-1), progress[:, 1:])
+
+    directional_loss = progress_loss.new_tensor(0.0)
+    directional_violation_rate = progress_loss.new_tensor(0.0)
+    away_step_rate = progress_loss.new_tensor(0.0)
+    if args.lambda_dir > 0:
+        directional_loss, directional_violation_rate, away_step_rate = compute_directional_penalty(
+            reward_predictions=progress_pred[positive_mask],
+            goal_distances=goal_distance[positive_mask],
+            tau_away=args.tau_away,
+            margin=args.margin,
+        )
+
+    (
+        forward_delta_mean,
+        forward_decrease_rate,
+        rewind_delta_mean,
+        rewind_non_decreasing_rate,
+        rewind_step_rate,
+    ) = _summarize_progress_deltas(
+        progress_targets=progress[positive_mask],
+        rewind_mask=rewind_mask[positive_mask],
+    )
+
+    loss = (args.lambda_prog * progress_loss) + (args.lambda_dir * directional_loss)
+    loss.backward()
+    if args.clip_grad:
+        torch.nn.utils.clip_grad_norm_(rewind_model.parameters(), 1.0)
+    optimizer.step()
+    if scheduler is not None:
+        scheduler.step()
+
+    wandb.log({
+        "train/loss": loss.item(),
+        "train/progress_loss": progress_loss.item(),
+        "train/directional_loss": directional_loss.item(),
+        "train/directional_violation_rate": directional_violation_rate.item(),
+        "train/away_step_rate": away_step_rate.item(),
+        "train/progress_target_mean": progress[positive_mask].mean().item(),
+        "train/progress_target_start": progress[positive_mask][:, 0].mean().item(),
+        "train/progress_target_end": progress[positive_mask][:, -1].mean().item(),
+        "train/goal_distance_mean": goal_distance[positive_mask].mean().item(),
+        "train/forward_progress_delta_mean": forward_delta_mean.item(),
+        "train/forward_progress_decrease_rate": forward_decrease_rate.item(),
+        "train/rewind_progress_delta_mean": rewind_delta_mean.item(),
+        "train/rewind_progress_non_decreasing_rate": rewind_non_decreasing_rate.item(),
+        "train/rewind_step_rate": rewind_step_rate.item(),
+        "lr": optimizer.param_groups[0]["lr"],
+    })
+    return loss.item()
+
+
 def train_step_fn(args, batch, rewind_model, optimizer, scheduler):
     #set to cuda
     openx_data, extra_data = batch
+    if extra_data is None:
+        return _train_step_openx_only(args, openx_data, rewind_model, optimizer, scheduler)
     openx_len = len(openx_data["video_array"])
     extra_len = len(extra_data["video_array"])
 

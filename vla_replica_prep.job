@@ -1,0 +1,23 @@
+#!/bin/bash
+#SBATCH --job-name=vla_replica_prep
+#SBATCH --output=/scr2/yusenluo/ReWiND/logs/vla_replica_prep_%j.out
+#SBATCH --error=/scr2/yusenluo/ReWiND/logs/vla_replica_prep_%j.err
+#SBATCH --ntasks=1
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=16
+#SBATCH --time=12:00:00
+#SBATCH --mem=64G
+
+source /scr/yusenluo/anaconda3/etc/profile.d/conda.sh
+conda activate rewind
+
+cd /scr2/yusenluo/ReWiND
+
+# Top camera, full 501 episodes, 32-frame subsample, 224x224 center crop.
+python -m data_preprocessing.generate_vla_replica_embeddings \
+  --dataset-dir datasets/VLAReplica_SFT_data \
+  --output-path datasets/vla_replica_sft_embeddings_train.h5 \
+  --camera-key observation.images.top \
+  --max-length 32 \
+  --max-episodes -1 \
+  --crop-size 224
